@@ -1,5 +1,4 @@
-
-// backend/index.js
+// // backend/index.js
 require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
@@ -110,6 +109,113 @@ app.post("/upload-report", upload.single("file"), async (req, res) => {
     res.status(500).send(String(err));
   }
 });
+
+// Firebase part
+require("dotenv").config();
+
+const admin = require("firebase-admin");
+
+
+
+
+// Initialize Firebase Admin
+const serviceAccount = require(path.resolve(process.env.FIREBASE_SERVICE_ACCOUNT_PATH));
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+const db = admin.firestore();
+
+// Middleware to verify Firebase ID tokens
+async function verifyFirebaseToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing token" });
+  }
+  const token = authHeader.split("Bearer ")[1];
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
+
+// ----- ROUTES -----
+
+// 1️⃣ Register user role (after signup)
+app.post("/register-role", verifyFirebaseToken, async (req, res) => {
+  try {
+    const { role } = req.body;
+    if (!["hospital", "pharmacy", "patient"].includes(role)) {
+      return res.status(400).json({ error: "Invalid role" });
+    }
+    await db.collection("users").doc(req.user.uid).set(
+      {
+        email: req.user.email,
+        role,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    res.json({ message: "Role registered successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/admin/get-token', async (req, res) => {
+  try {
+    const { uid, email } = req.body;
+    
+    // Create a custom token
+    const token = await admin.auth().createCustomToken(uid, {
+      email: email || 'test@example.com'
+    });
+    
+    res.json({ token });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 2️⃣ Get current user profile
+app.get("/profile", verifyFirebaseToken, async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.user.uid).get();
+    if (!doc.exists) return res.status(404).json({ error: "User not found" });
+    res.json(doc.data());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3️⃣ Get reports visible to the logged-in user (by role)
+app.get("/reports", verifyFirebaseToken, async (req, res) => {
+  try {
+    const userDoc = await db.collection("users").doc(req.user.uid).get();
+    const user = userDoc.data();
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    let query;
+    if (user.role === "hospital") {
+      query = db.collection("reports").where("uploaderRole", "==", "hospital");
+    } else if (user.role === "pharmacy") {
+      query = db.collection("reports").where("recipientRole", "==", "pharmacy");
+    } else {
+      query = db.collection("reports").where("recipientRole", "==", "patient");
+    }
+
+    const snapshot = await query.get();
+    const reports = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    res.json({ reports });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// firebase end
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
